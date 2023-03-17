@@ -11,10 +11,10 @@ from datetime import datetime
 
 import telegram
 from telegram import (
-    Update, 
-    User, 
-    InlineKeyboardButton, 
-    InlineKeyboardMarkup, 
+    Update,
+    User,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     BotCommand
 )
 from telegram.ext import (
@@ -74,15 +74,15 @@ async def register_user_if_not_exists(update: Update, context: CallbackContext, 
 async def start_handle(update: Update, context: CallbackContext):
     await register_user_if_not_exists(update, context, update.message.from_user)
     user_id = update.message.from_user.id
-    
+
     db.set_user_attribute(user_id, "last_interaction", datetime.now())
     db.start_new_dialog(user_id)
-    
+
     reply_text = "Hi! I'm <b>ChatGPT</b> bot implemented with GPT-3.5 OpenAI API 🤖\n\n"
     reply_text += HELP_MESSAGE
 
     reply_text += "\nAnd now... ask me anything!"
-    
+
     await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML)
 
 
@@ -96,7 +96,7 @@ async def help_handle(update: Update, context: CallbackContext):
 async def retry_handle(update: Update, context: CallbackContext):
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
-    
+
     user_id = update.message.from_user.id
     db.set_user_attribute(user_id, "last_interaction", datetime.now())
 
@@ -116,13 +116,13 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
     if update.edited_message is not None:
         await edited_message_handle(update, context)
         return
-        
+
     await register_user_if_not_exists(update, context, update.message.from_user)
     if await is_previous_message_not_answered_yet(update, context): return
 
     user_id = update.message.from_user.id
     chat_mode = db.get_user_attribute(user_id, "current_chat_mode")
-    
+
     async with user_semaphores[user_id]:
         # new dialog timeout
         if use_new_dialog_timeout:
@@ -174,7 +174,7 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
 
                 answer = answer[:4096]  # telegram message limit
                 if i == 0:  # send first message (then it'll be edited if message streaming is enabled)
-                    try:                    
+                    try:
                         sent_message = await update.message.reply_text(answer, parse_mode=parse_mode)
                     except telegram.error.BadRequest as e:
                         if str(e).startswith("Message must be non-empty"):  # first answer chunk from openai was empty
@@ -187,7 +187,7 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
                     if abs(len(answer) - len(prev_answer)) < 100 and status != "finished":
                         continue
 
-                    try:                    
+                    try:
                         await context.bot.edit_message_text(answer, chat_id=sent_message.chat_id, message_id=sent_message.message_id, parse_mode=parse_mode)
                     except telegram.error.BadRequest as e:
                         if str(e).startswith("Message is not modified"):
@@ -196,7 +196,7 @@ async def message_handle(update: Update, context: CallbackContext, message=None,
                             await context.bot.edit_message_text(answer, chat_id=sent_message.chat_id, message_id=sent_message.message_id)
 
                     await asyncio.sleep(0.01)  # wait a bit to avoid flooding
-                    
+
                 prev_answer = answer
 
             # update user data
@@ -377,6 +377,15 @@ async def post_init(application: Application):
         BotCommand("/help", "Show help message"),
     ])
 
+async def message_handle_group(update: Update, context: CallbackContext, message=None, use_new_dialog_timeout=True):
+    # message not reply to the bot will not be handled
+    message_ori = update.message or update.edited_message
+    if message_ori.reply_to_message and message_ori.reply_to_message.from_user.id != context.bot.id:
+        return
+
+    await message_handle(update, context, message, use_new_dialog_timeout)
+
+
 def run_bot() -> None:
     application = (
         ApplicationBuilder()
@@ -394,22 +403,30 @@ def run_bot() -> None:
         user_ids = [x for x in config.allowed_telegram_usernames if isinstance(x, int)]
         user_filter = filters.User(username=usernames) | filters.User(user_id=user_ids)
 
+    # add custom filter
+    reply_filter = filters.REPLY
+    mention_filter = filters.Regex(config.bot_name)
+    group_filter = filters.ChatType.GROUPS & filters.TEXT &  (reply_filter | mention_filter) & ~filters.COMMAND & user_filter
+    private_filter = filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & user_filter
+
     application.add_handler(CommandHandler("start", start_handle, filters=user_filter))
     application.add_handler(CommandHandler("help", help_handle, filters=user_filter))
 
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, message_handle))
+    application.add_handler(MessageHandler(group_filter, message_handle_group))
+    application.add_handler(MessageHandler(private_filter, message_handle))
+
     application.add_handler(CommandHandler("retry", retry_handle, filters=user_filter))
     application.add_handler(CommandHandler("new", new_dialog_handle, filters=user_filter))
 
     application.add_handler(MessageHandler(filters.VOICE & user_filter, voice_message_handle))
-    
+
     application.add_handler(CommandHandler("mode", show_chat_modes_handle, filters=user_filter))
     application.add_handler(CallbackQueryHandler(set_chat_mode_handle, pattern="^set_chat_mode"))
 
     application.add_handler(CommandHandler("balance", show_balance_handle, filters=user_filter))
-    
+
     application.add_error_handler(error_handle)
-    
+
     # start the bot
     application.run_polling()
 
